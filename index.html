@@ -631,9 +631,14 @@
     </div>
 </footer>
 
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
+<script>
 const API_KEY      = '41891|n5wLSGyiTm8O6CtoA7CMNBj2GFNNQRRsMDdhAefA6bbd17fa';
 const API_ENDPOINT = 'https://checkapp.site/api/v2';
+
+// ─── TESTING CONFIG ──────────────────────────────────────────────
+// Set a USA IP here for local testing. Set to null in production.
+const DEBUG_STATIC_IP = null; // e.g. '104.129.196.1' to force a US IP
+// ─────────────────────────────────────────────────────────────────
 const REQUIRED_OFFERS = 2;
 const REQUIRED_TIME   = 180000;
 
@@ -660,23 +665,78 @@ function escapeHtml(str) {
 }
 
 async function getClientIP() {
-    try { const r = await fetch('https://api.ipify.org?format=json'); return (await r.json()).ip; } catch(e) { return 'unknown'; }
+    // Use static debug IP if set (for local testing with a USA IP)
+    if (DEBUG_STATIC_IP) {
+        console.log('[DEBUG] Using static IP:', DEBUG_STATIC_IP);
+        return DEBUG_STATIC_IP;
+    }
+
+    // List of fallback IP services — tried in order
+    const services = [
+        { url: 'https://api.ipify.org?format=json',        parse: d => d.ip },
+        { url: 'https://ipapi.co/json/',                   parse: d => d.ip },
+        { url: 'https://api.my-ip.io/ip.json',             parse: d => d.ip },
+        { url: 'https://ipinfo.io/json',                   parse: d => d.ip },
+        { url: 'https://extreme-ip-lookup.com/json/',      parse: d => d.query },
+    ];
+
+    for (const svc of services) {
+        try {
+            const ctrl = new AbortController();
+            const timeout = setTimeout(() => ctrl.abort(), 4000); // 4s timeout per service
+            const res = await fetch(svc.url, {
+                signal: ctrl.signal,
+                mode: 'cors',
+                cache: 'no-cache',
+            });
+            clearTimeout(timeout);
+            if (!res.ok) continue;
+            const data = await res.json();
+            const ip = svc.parse(data);
+            if (ip && ip !== 'undefined') {
+                console.log('[IP] Detected via', svc.url, '->', ip);
+                return ip;
+            }
+        } catch (e) {
+            console.warn('[IP] Failed:', svc.url, e.message);
+        }
+    }
+
+    // Last resort — return empty string (OGAds still works, just no geo targeting)
+    console.warn('[IP] All services failed, using empty IP');
+    return '';
 }
 
 async function fetchOffers() {
     try {
         const ip = await getClientIP();
         const ua = navigator.userAgent;
-        const headers = { 'Authorization': 'Bearer ' + API_KEY };
+        const headers = {
+            'Authorization': 'Bearer ' + API_KEY,
+            'Accept': 'application/json',
+        };
+
+        const fetchOpts = {
+            method: 'GET',
+            headers,
+            mode: 'cors',
+            cache: 'no-cache',
+        };
+
+        console.log('[Offers] Fetching with IP:', ip || '(empty)');
+
         const [cpiR, othR] = await Promise.all([
-            fetch(API_ENDPOINT + '?' + new URLSearchParams({ip, user_agent: ua, ctype: 1}), {headers}),
-            fetch(API_ENDPOINT + '?' + new URLSearchParams({ip, user_agent: ua, ctype: 0}), {headers})
+            fetch(API_ENDPOINT + '?' + new URLSearchParams({ip, user_agent: ua, ctype: 1}), fetchOpts),
+            fetch(API_ENDPOINT + '?' + new URLSearchParams({ip, user_agent: ua, ctype: 0}), fetchOpts)
         ]);
         const cpiD = await cpiR.json();
         const othD = await othR.json();
+        console.log('[Offers] CPI response:', cpiD);
+        console.log('[Offers] Other response:', othD);
         allOffers = [];
         if (cpiD.success && cpiD.offers) allOffers = allOffers.concat(cpiD.offers.map(o => ({...o, isCPI:true})));
         if (othD.success && othD.offers) allOffers = allOffers.concat(othD.offers);
+        console.log('[Offers] Total loaded:', allOffers.length);
         if (allOffers.length > 0) { displayOffers(allOffers); }
         else { document.getElementById('offersGrid').innerHTML = '<div class="error-message"><p>No offers available. Try on a mobile device or disable AdBlock.</p></div>'; }
     } catch(err) {
